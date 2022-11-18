@@ -1,0 +1,104 @@
+```{r}
+# Load required libraries
+library(data.table)
+library(cmdstanr)
+library(posterior)
+library(ggplot2)
+library(patchwork)
+library(bayesplot)
+```
+
+```{r}
+# Simulate the data
+set.seed(123)
+N <- 30
+P <- 1000
+t <- seq(1, N)
+alpha <- -3
+beta0 <- 0.15
+beta <- -0.2
+tau <- 10
+
+mu = exp(alpha + beta0*t + ifelse(t < tau, 0, beta*(t - tau)) + log(P)) 
+y = rpois(N, mu)
+
+dt <- data.table(t = t, y = y)
+ggplot(dt, aes(t, y)) + 
+  geom_point(color = 4, size = 3, alpha = 0.7) + 
+  labs(x = "Time", y = "Observed cases") + 
+  theme_bw()
+```
+
+```{r}
+# Compile stan model
+model <- cmdstan_model(stan_file = "~/Stanford/BayesJP/stan_models/bayes-jp2.stan", compile=TRUE)
+```
+
+```{r}
+J <- 4
+Delta <- t(as.matrix(expand.grid(replicate(J, 0:1, simplify = FALSE))))
+
+# Configure stan data
+stan_data <- list(
+  N = nrow(dt),
+  Y = dt$y,
+  t = dt$t,
+  J = J,
+  J2 = as.integer(2^J),
+  Delta = Delta,
+  IDX_NCP = colSums(Delta) + 1,
+  P = rep(1000, N)
+)
+
+model_inits = function() { 
+  J <- 4
+  t <- t
+  tauinf <- (min(t) + 2)
+  tausup <- (max(t) - 2)
+  fullstep <- (tausup - tauinf) / 2
+  halfstep <- (fullstep - 2)/2
+  
+  x <- seq(tauinf, tausup, length.out = J+1) + halfstep
+  
+  list(
+    tau = x[1:J],
+    gamma = 0.5 + rnorm(1, 0, 0.1)
+  )
+}
+```
+
+```{r}
+fit <- model$sample(data = stan_data, iter_warmup = 300, 
+                    iter_sampling = 100, chains = 4, parallel_chains = 4,
+                    init = model_inits)
+```
+
+
+```{r fig.height=5}
+po <- fit$draws()
+
+bayesplot::mcmc_trace(po, regex_pars = c("alpha"))
+
+dt.po <- melt(subset(po, "yhat"))
+```
+
+```{r}
+library(invgamma)
+curve( dinvgamma(x, 1, 0.5), from = 0, to = 2)
+```
+
+
+
+```{r}
+dt.po <- as.data.table(fit$summary("yhat"))
+dt.po[, t := t]
+dt.po[, y := y]
+
+ggplot(dt.po, aes(t, y)) + 
+  geom_point() + 
+  geom_line(aes(y = median)) + 
+  geom_ribbon(aes(ymin = q5, ymax = q95), alpha = 0.3) + 
+  scale_y_continuous(limits = c(0, 500)) + 
+  scale_x_continuous(limits = c(0, 15))
+```
+
